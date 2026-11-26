@@ -463,7 +463,7 @@ jobs:
           source config/marble.env
           source release/resolved-refs.env
           config_hash="$(sha256sum scripts/build-kernel.sh scripts/package-anykernel.sh \
-            scripts/audit-flashable-zip.sh scripts/resolve-kernel-source.sh \
+            scripts/audit-flashable-zip.sh scripts/resolve-kernel-source.sh scripts/resolve-refs.sh scripts/apply-susfs.sh \
             scripts/validate-marble-devicetree.sh scripts/apply-epss-lut-debug.sh patches/epss/0001-epss-lut-read-only-diagnostics.patch \
             ak3/anykernel.sh config/marble.env config/managers.json config/kernel-sources.json \
             .github/workflows/build-matrix.yml | sha256sum | cut -d' ' -f1)"
