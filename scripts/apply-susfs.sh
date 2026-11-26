@@ -19,8 +19,45 @@ fi
 
 work_root="$(pwd)"
 susfs_dir="${work_root}/susfs4ksu"
-git clone "${SUSFS_REPO}" "${susfs_dir}"
-git -C "${susfs_dir}" checkout "${susfs_commit}"
+
+# resolve-refs.sh now keeps the already-resolved checkout in the workspace.
+# Reuse it instead of cloning GitLab a second time (the previous duplicate
+# clone caused builds to fail when GitLab returned HTTP 503).
+if [[ ! -d "${susfs_dir}/.git" ]]; then
+  echo "SUSFS source checkout is missing; attempting a retrying clone as a fallback"
+  clone_ok=false
+  for attempt in 1 2 3 4 5; do
+    echo "SUSFS: cloning ${SUSFS_REPO} (attempt ${attempt}/5)"
+    if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
+      clone --filter=blob:none --no-checkout "${SUSFS_REPO}" "${susfs_dir}"; then
+      clone_ok=true
+      break
+    fi
+    rm -rf "${susfs_dir}"
+    if [[ "${attempt}" -lt 5 ]]; then
+      delay=$((attempt * 6))
+      echo "SUSFS: clone failed; retrying in ${delay}s"
+      sleep "${delay}"
+    fi
+  done
+  if [[ "${clone_ok}" != "true" ]]; then
+    echo "::error::Could not clone SUSFS after 5 attempts from ${SUSFS_REPO} (last failure may be HTTP 503). Re-run later, or disable Enable SUSFS."
+    exit 1
+  fi
+fi
+
+# Always verify that the source checkout is exactly the commit pinned by
+# resolve-refs.sh; never silently build from a newer/different SUSFS revision.
+if ! git -C "${susfs_dir}" cat-file -e "${susfs_commit}^{commit}" 2>/dev/null; then
+  echo "::error::Cached SUSFS checkout does not contain pinned commit ${susfs_commit}; refusing to use a different revision"
+  exit 1
+fi
+git -C "${susfs_dir}" checkout --detach "${susfs_commit}"
+actual_susfs_commit="$(git -C "${susfs_dir}" rev-parse HEAD)"
+if [[ "${actual_susfs_commit}" != "${susfs_commit}" ]]; then
+  echo "::error::SUSFS commit mismatch: expected ${susfs_commit}, got ${actual_susfs_commit}"
+  exit 1
+fi
 
 patch_root="${susfs_dir}/kernel_patches"
 if [[ ! -d "${patch_root}" ]]; then

@@ -63,30 +63,47 @@ manager_tag="$(echo "${all_tags}" | awk -v sha="${manager_commit}" '
   }')"
 
 if [[ "${ENABLE_SUSFS}" == "true" ]]; then
-  susfs_commit="${SUSFS_COMMIT}"
+  susfs_requested_ref="${SUSFS_COMMIT}"
+  # Keep the resolved checkout in the workspace so apply-susfs.sh can reuse it.
+  # The old flow cloned GitLab once here and then cloned it a second time in
+  # apply-susfs.sh; a transient GitLab 503 during that second clone aborted CI.
+  susfs_source_dir="${PWD}/susfs4ksu"
+  rm -rf "${susfs_source_dir}"
 
-  tmp_susfs="$(mktemp -d)"
-  cleanup_tmp_susfs() {
-    local dir="${1:-}"
-    [[ -n "${dir}" && -d "${dir}" ]] || return 0
-    chmod -R u+w "${dir}" 2>/dev/null || true
-    rm -rf "${dir}" 2>/dev/null || true
-  }
-  trap 'cleanup_tmp_susfs "${tmp_susfs}"' EXIT
+  clone_ok=false
+  for attempt in 1 2 3 4 5; do
+    echo "SUSFS: cloning ${SUSFS_REPO} (attempt ${attempt}/5)"
+    if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
+      clone --filter=blob:none --no-checkout "${SUSFS_REPO}" "${susfs_source_dir}"; then
+      clone_ok=true
+      break
+    fi
+    rm -rf "${susfs_source_dir}"
+    if [[ "${attempt}" -lt 5 ]]; then
+      delay=$((attempt * 6))
+      echo "SUSFS: clone failed; retrying in ${delay}s (transient HTTP 5xx/network errors are retried)"
+      sleep "${delay}"
+    fi
+  done
 
-  git clone --filter=blob:none --no-checkout "${SUSFS_REPO}" "${tmp_susfs}"
-  git -C "${tmp_susfs}" checkout "${susfs_commit}"
+  if [[ "${clone_ok}" != "true" ]]; then
+    echo "::error::Could not clone SUSFS after 5 attempts from ${SUSFS_REPO}. This may be a temporary GitLab outage (for example HTTP 503). Re-run the workflow later, or disable Enable SUSFS for an image-only build."
+    exit 1
+  fi
+
+  if ! git -C "${susfs_source_dir}" checkout "${susfs_requested_ref}"; then
+    echo "::error::SUSFS ref ${susfs_requested_ref} was not found in ${SUSFS_REPO}"
+    exit 1
+  fi
   # Accept a branch/tag too: pin to the exact commit so cache keys and logs stay reproducible.
-  susfs_commit="$(git -C "${tmp_susfs}" rev-parse HEAD)"
+  susfs_commit="$(git -C "${susfs_source_dir}" rev-parse HEAD)"
+  susfs_repo_used="$(git -C "${susfs_source_dir}" remote get-url origin)"
   susfs_reported_version="$(
-    find "${tmp_susfs}/kernel_patches" -path '*/include/linux/susfs.h' -type f -print0 2>/dev/null |
+    find "${susfs_source_dir}/kernel_patches" -path '*/include/linux/susfs.h' -type f -print0 2>/dev/null |
       xargs -0 -r grep -hoE 'SUSFS_VERSION[[:space:]]+"v[0-9]+\.[0-9]+\.[0-9]+"' 2>/dev/null |
       head -n1 |
       sed -E 's/.*"(v[^"]+)".*/\1/' || true
   )"
-
-  cleanup_tmp_susfs "${tmp_susfs}"
-  trap - EXIT
 
   susfs_url="https://gitlab.com/simonpunk/susfs4ksu/-/commit/${susfs_commit}"
 fi
@@ -120,6 +137,8 @@ fi
   echo "susfs_commit=${susfs_commit}"
   echo "susfs_reported_version=${susfs_reported_version}"
   echo "susfs_url=${susfs_url}"
+  echo "susfs_repo_used=${susfs_repo_used:-}"
+  echo "susfs_source_dir=${susfs_source_dir:-}"
   echo "enable_nomount=${ENABLE_NOMOUNT}"
   echo "nomount_repo=${NOMOUNT_REPO:-}"
   echo "nomount_ref=${NOMOUNT_REF:-}"
