@@ -1,0 +1,99 @@
+--- a/drivers/cpufreq/qcom-cpufreq-hw-debug.c
++++ b/drivers/cpufreq/qcom-cpufreq-hw-debug.c
+@@ -6,6 +6,7 @@
+ 
+ #define pr_fmt(fmt) "cpufreq_hw_debug: %s: " fmt, __func__
+ 
++#include <linux/bits.h>
+ #include <linux/device.h>
+ #include <linux/kernel.h>
+ #include <linux/mfd/syscon.h>
+@@ -37,8 +38,16 @@
+ static struct cpufreq_hwregs *hw_regs;
+ static const u16 *offsets;
+ static struct kobj_attribute cpufreq_hwregs_attr;
++static struct kobj_attribute cpufreq_hw_lut_attr;
+ static struct kobject *cpufreqhw_kobj;
+ 
++/* EPSS register layout; qcom,cpufreq-hw-epss uses 4-byte LUT rows. */
++#define EPSS_REG_FREQ_LUT	0x100
++#define EPSS_REG_VOLT_LUT	0x200
++#define EPSS_LUT_ROW_SIZE	4
++#define EPSS_LUT_MAX_ENTRIES	40
++#define EPSS_LUT_VOLT_MASK	GENMASK(11, 0)
++
+ static const u16 cpufreq_qcom_std_data[] = {
+ 	[REG_PERF_STATE]		= 0x920,
+ 	[REG_CYCLE_CNTR]		= 0x9c0,
+@@ -86,6 +95,41 @@
+ 	return count;
+ }
+ 
++/*
++ * Read-only dump of the EPSS frequency and voltage LUTs.
++ * The voltage code is the low 12 bits of VOLT_LUT; the cpufreq
++ * driver converts it to microvolts by multiplying it by 1000.
++ */
++static ssize_t cpufreq_hw_lut_show(struct kobject *kobj,
++		struct kobj_attribute *attr, char *buf)
++{
++	int i;
++	unsigned int row;
++	ssize_t count = 0;
++	u32 freq, volt;
++
++	if (offsets != cpufreq_qcom_std_epss_data)
++		return -EOPNOTSUPP;
++
++	for (i = 0; i < hw_regs->domain_cnt; i++) {
++		count += scnprintf(buf + count, PAGE_SIZE - count,
++				"DOMAIN %d: row freq_lut_raw volt_code\n", i);
++		for (row = 0; row < EPSS_LUT_MAX_ENTRIES; row++) {
++			freq = readl_relaxed(hw_regs->base[i] +
++					EPSS_REG_FREQ_LUT + row * EPSS_LUT_ROW_SIZE);
++			volt = readl_relaxed(hw_regs->base[i] +
++					EPSS_REG_VOLT_LUT + row * EPSS_LUT_ROW_SIZE);
++			count += scnprintf(buf + count, PAGE_SIZE - count,
++					"%02u 0x%08x 0x%03x\n", row, freq,
++					volt & EPSS_LUT_VOLT_MASK);
++			if (count >= PAGE_SIZE - 1)
++				return PAGE_SIZE - 1;
++		}
++	}
++
++	return count;
++}
++
+ static int cpufreq_panic_callback(struct notifier_block *nfb,
+ 					unsigned long event, void *unused)
+ {
+@@ -191,6 +235,19 @@
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "Failed to create sysfs entry\n");
+ 		kobject_put(cpufreqhw_kobj);
++		return ret;
++	}
++
++	sysfs_attr_init(&cpufreq_hw_lut_attr.attr);
++	cpufreq_hw_lut_attr.attr.name = "print_cpufreq_lut";
++	cpufreq_hw_lut_attr.show = cpufreq_hw_lut_show;
++	cpufreq_hw_lut_attr.attr.mode = 0444;
++
++	ret = sysfs_create_file(cpufreqhw_kobj, &cpufreq_hw_lut_attr.attr);
++	if (ret) {
++		dev_err(&pdev->dev, "Failed to create EPSS LUT sysfs entry\n");
++		sysfs_remove_file(cpufreqhw_kobj, &cpufreq_hwregs_attr.attr);
++		kobject_put(cpufreqhw_kobj);
+ 	}
+ 
+ 	return ret;
+@@ -203,7 +260,8 @@
+ 
+ static int qcom_cpufreq_hw_debug_remove(struct platform_device *pdev)
+ {
+-	sysfs_remove_file(kernel_kobj, &cpufreq_hwregs_attr.attr);
++	sysfs_remove_file(cpufreqhw_kobj, &cpufreq_hw_lut_attr.attr);
++	sysfs_remove_file(cpufreqhw_kobj, &cpufreq_hwregs_attr.attr);
+ 	kobject_put(cpufreqhw_kobj);
+ 	return 0;
+ }
